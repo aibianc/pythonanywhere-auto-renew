@@ -99,8 +99,22 @@ def renew_via_browser(username, password):
     print("使用浏览器自动化方式...")
     
     with sync_playwright() as p:
+        # 在GitHub Actions中使用headless模式
         headless_mode = os.getenv("HEADLESS", "true").lower() == "true"
-        browser = p.chromium.launch(headless=headless_mode)
+        browser = p.chromium.launch(
+            headless=headless_mode,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--no-first-run',
+                '--disable-default-apps',
+                '--disable-extensions',
+                '--mute-audio'
+            ]
+        )
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -108,79 +122,200 @@ def renew_via_browser(username, password):
         page = context.new_page()
         
         try:
-            # 登录
-            print("正在登录...")
-            page.goto("https://www.pythonanywhere.com/login/")
-            page.wait_for_load_state('networkidle')
-            
-            username_input = page.wait_for_selector("input[name='auth-username'], input#id_auth-username", timeout=10000)
-            username_input.fill(username)
-            
-            password_input = page.wait_for_selector("input[name='auth-password'], input#id_auth-password", timeout=10000)
-            password_input.fill(password)
-            
-            login_button = page.wait_for_selector("button[type='submit'], input[type='submit']", timeout=10000)
-            login_button.click()
-            
-            page.wait_for_url("**/user/**", timeout=20000)
-            print("✓ 登录成功")
-            
-            # 导航到webapp页面
-            print("正在导航到Web应用配置页面...")
-            webapp_id = f"{username}_pythonanywhere_com"
-            webapp_url = f"https://www.pythonanywhere.com/user/{username}/webapps/#tab_id_{webapp_id}"
-            page.goto(webapp_url)
-            page.wait_for_load_state('networkidle')
-            page.wait_for_timeout(3000)
-            
-            # 查找并点击按钮
-            print("正在查找续期按钮...")
-            
-            # 监听网络请求，看点击按钮时是否有API调用
-            api_called = []
-            def handle_request(request):
-                if 'extend' in request.url.lower() or 'webapp' in request.url.lower():
-                    api_called.append({
-                        'url': request.url,
-                        'method': request.method,
-                        'headers': request.headers
-                    })
-            
-            page.on('request', handle_request)
-            
-            # 查找按钮
-            button_selectors = [
-                "button:has-text('Run until 3 months from today')",
-                "button:has-text('Run until')",
-            ]
-            
-            button_found = False
-            for selector in button_selectors:
+            # 步骤1: 直接导航到webapps页面（使用wang5948的URL）
+            print("步骤1: 导航到Web应用页面...")
+            webapp_url = "https://www.pythonanywhere.com/user/wang5948/webapps/#tab_id_wang5948_pythonanywhere_com"
+
+            print(f"正在访问: {webapp_url}")
+            try:
+                # 先尝试短超时快速检测
+                page.goto(webapp_url, timeout=15000)
+                print("✓ 页面导航成功")
+            except Exception as e:
+                print(f"页面导航失败（15秒超时）: {e}")
+                print("重试导航，使用更长超时时间...")
+                page.goto(webapp_url, timeout=60000)
+                print("✓ 页面导航成功（重试）")
+
+            # 等待页面开始加载
+            page.wait_for_load_state('domcontentloaded', timeout=30000)
+
+            # 多次检查URL变化（处理重定向）
+            max_checks = 10
+            for i in range(max_checks):
+                current_url = page.url
+                if "login" in current_url:
+                    print("✓ 检测到登录页面，开始自动登录...")
+                    break
+                elif "user" in current_url and "webapps" in current_url:
+                    print("✓ 已在Web应用页面，无需登录")
+                    break
+                else:
+                    page.wait_for_timeout(2000)
+
+            # 最终检查是否需要登录
+            current_url = page.url
+            if "login" in current_url:
+                print("开始登录流程...")
+
+                # 确保登录页面完全加载
+                page.wait_for_load_state('networkidle', timeout=30000)
+
+                # 步骤2: 填写登录信息
+                print("步骤2: 填写登录信息...")
+                username_input = page.wait_for_selector("input[name='auth-username']", timeout=20000)
+                username_input.fill(username)
+                print("✓ 用户名已填写")
+
+                password_input = page.wait_for_selector("input[name='auth-password']", timeout=20000)
+                password_input.fill(password)
+                print("✓ 密码已填写")
+
+                # 步骤3: 点击登录按钮
+                print("步骤3: 点击登录按钮...")
+                login_button = page.wait_for_selector("button[type='submit']", timeout=20000)
+                login_button.click()
+                print("✓ 登录按钮已点击")
+
+                # 步骤4: 等待登录成功 - 使用多种等待策略
+                print("步骤4: 等待登录完成...")
+                login_success = False
+
+                # 策略1: 等待URL变化
                 try:
-                    button = page.wait_for_selector(selector, timeout=3000)
-                    if button:
-                        print(f"✓ 找到按钮")
-                        button.scroll_into_view_if_needed()
-                        page.wait_for_timeout(1000)
-                        
-                        print("正在点击按钮...")
-                        button.click()
-                        page.wait_for_timeout(3000)
-                        
-                        if api_called:
-                            print(f"检测到API调用: {api_called[0]['method']} {api_called[0]['url']}")
-                        
-                        print("✓ 按钮已点击")
-                        button_found = True
-                        break
-                except PlaywrightTimeout:
-                    continue
+                    page.wait_for_url("**/user/**", timeout=45000)
+                    print("✓ 通过URL变化检测到登录成功")
+                    login_success = True
+                except Exception as e:
+                    print(f"URL等待超时: {e}")
+
+                # 策略2: 检查页面内容变化
+                if not login_success:
+                    try:
+                        page.wait_for_selector("input[name='auth-username']", state="hidden", timeout=10000)
+                        print("✓ 通过页面内容变化检测到登录成功")
+                        login_success = True
+                    except Exception as e:
+                        print(f"页面内容检测失败: {e}")
+
+                # 策略3: 检查是否有用户菜单
+                if not login_success:
+                    try:
+                        page.wait_for_selector("a[href*='dashboard']", timeout=10000)
+                        print("✓ 检测到用户界面，登录成功")
+                        login_success = True
+                    except Exception as e:
+                        print(f"用户界面检测失败: {e}")
+
+                if login_success:
+                    print("✓ 登录成功！")
+                else:
+                    raise Exception("所有登录检测方法都失败")
+
+                # 重新导航到webapp页面
+                print("重新导航到Web应用页面...")
+                page.goto(webapp_url, timeout=60000)
+                page.wait_for_load_state('networkidle', timeout=30000)
+
+            # 步骤5: 等待webapp页面完全加载
+            print("步骤5: 等待Web应用页面完全加载...")
+            page.wait_for_load_state('domcontentloaded', timeout=30000)
+            page.wait_for_load_state('networkidle', timeout=30000)
+
+            # 额外等待确保动态内容加载完成
+            page.wait_for_timeout(8000)
+
+            # 验证页面是否正确加载
+            current_url = page.url
+            if "webapps" not in current_url:
+                raise Exception(f"页面URL不正确: {current_url}")
+
+            print("✓ Web应用页面加载完成")
             
-            if not button_found:
-                return False, "无法找到续期按钮"
-            
+            # 步骤6: 查找续期按钮 - 增强版
+            print("步骤6: 查找续期按钮...")
+
+            # 多次尝试查找按钮（处理动态加载）
+            renew_button = None
+            max_attempts = 5
+
+            for attempt in range(max_attempts):
+                print(f"查找按钮尝试 {attempt + 1}/{max_attempts}...")
+
+                all_buttons = page.query_selector_all("button, input[type='submit']")
+                print(f"找到 {len(all_buttons)} 个按钮元素")
+
+                # 查找续期按钮
+                for btn in all_buttons:
+                    try:
+                        text = (btn.text_content() or "").strip()
+                        value = (btn.get_attribute("value") or "").strip()
+                        full_text = f"{text} {value}".strip()
+
+                        # 多种匹配条件
+                        if ("Run until 3 months from today" in full_text or
+                            "Run until" in full_text and "months" in full_text):
+                            renew_button = btn
+                            print(f"✓ 找到续期按钮: '{full_text}'")
+                            break
+                    except Exception as e:
+                        continue
+
+                if renew_button:
+                    break
+
+                # 如果没找到，等待更长时间再试
+                if attempt < max_attempts - 1:
+                    print("未找到按钮，等待页面加载更多内容...")
+                    page.wait_for_timeout(3000)
+
+            if not renew_button:
+                return False, "在多次尝试后仍未找到续期按钮"
+
+            # 步骤7: 点击续期按钮
+            print("步骤7: 点击续期按钮...")
+            try:
+                renew_button.scroll_into_view_if_needed()
+                page.wait_for_timeout(2000)
+
+                # 确保按钮可见和可点击
+                is_visible = renew_button.is_visible()
+                is_enabled = renew_button.is_enabled()
+                print(f"按钮状态 - 可见: {is_visible}, 可点击: {is_enabled}")
+
+                if is_visible and is_enabled:
+                    renew_button.click()
+                    print("✓ 续期按钮已点击")
+                else:
+                    raise Exception("按钮不可点击")
+
+            except Exception as e:
+                return False, f"点击按钮失败: {e}"
+
+            # 步骤8: 等待续期操作完成
+            print("步骤8: 等待续期操作完成...")
+            page.wait_for_timeout(5000)
+
+            try:
+                page.wait_for_load_state('networkidle', timeout=15000)
+                print("✓ 续期操作完成，页面已更新")
+            except Exception as e:
+                print(f"等待页面更新超时，但操作可能已成功: {e}")
+
+            print("✓ 续期操作完成")
+
+            # 获取到期日期
+            expiry_date = "未知"
+            try:
+                date_elements = page.locator("text=/This site will be disabled on/").all_text_contents()
+                if date_elements:
+                    expiry_date = date_elements[0].replace('This site will be disabled on', '').strip()
+                print(f"续期后到期日期: {expiry_date}")
+            except:
+                print("无法获取到期日期")
+
             browser.close()
-            return True, "续期成功（通过浏览器自动化）"
+            return True, f"续期成功！网站已延长到: {expiry_date}"
             
         except Exception as e:
             browser.close()
@@ -203,14 +338,9 @@ def main():
     print(f"用户名: {username}")
     print(f"Web应用ID: {webapp_id}\n")
     
-    # 先尝试API方式
-    print("[方法1] 尝试使用API接口...")
-    success, message = renew_via_api(username, password)
-    
-    if not success and "API方式不可用" in message:
-        # 如果API不可用，使用浏览器自动化
-        print(f"\n[方法2] {message}")
-        success, message = renew_via_browser(username, password)
+    # 直接使用浏览器自动化（API方法暂时跳过）
+    print("[浏览器自动化] 开始续期流程...")
+    success, message = renew_via_browser(username, password)
     
     print("\n" + "=" * 60)
     if success:
